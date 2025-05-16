@@ -15,12 +15,13 @@
 #include <netatalk/endian.h>
 #include <netatalk/at.h>
 #include <atalk/atp.h>
+#include <atalk/ddp.h>
 #include <atalk/util.h>
 #include <atalk/unicode.h>
 #include <atalk/zip.h>
 
 #define MACCHARSET "MAC_ROMAN"
-
+#define ZIPOP_DEFAULT ZIPOP_GETZONELIST
 
 static void print_zones(short n, char *buf, charset_t charset);
 
@@ -39,33 +40,28 @@ int main(int argc, char *argv[])
     char reqdata[4], buf[ATP_MAXDATA];
     struct iovec iov;
     short temp, index = 0;
-    int c, myzoneflg = 0, localzonesflg = 0, errflg = 0;
+    int c, errflg = 0;
     extern int optind;
     charset_t chMac = CH_MAC;
-    
+    uint8_t lookup_type = ZIPOP_DEFAULT;
+
     set_charset_name(CH_UNIX, "UTF8");
     set_charset_name(CH_MAC, MACCHARSET);
-    
-    reqdata[0] = ZIPOP_GETZONELIST;
 
     while ((c = getopt(argc, argv, "mlc:")) != EOF) {
         switch (c) {
         case 'm':
-            if (localzonesflg) {
+            if (lookup_type != ZIPOP_DEFAULT) {
                 ++errflg;
             }
-
-            ++myzoneflg;
-            reqdata[0] = ZIPOP_GETMYZONE;
+            lookup_type = ZIPOP_GETMYZONE;
             break;
 
         case 'l':
-            if (myzoneflg) {
+            if (lookup_type != ZIPOP_DEFAULT) {
                 ++errflg;
             }
-
-            ++localzonesflg;
-            reqdata[0] = ZIPOP_GETLOCALZONES;
+            lookup_type = ZIPOP_GETLOCALZONES;
             break;
 
         case 'c':
@@ -113,8 +109,20 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    index = (myzoneflg ? 0 : 1);
+    reqdata[0] = lookup_type;
     reqdata[1] = 0;
+
+    // We need to set the 'starting index' in the query we're going to send out.
+    // This allows for a kind of pagination; you ask for zones starting at zone 1 and
+    // you get a reply's worth.  Say you get three zones back.  You then add three to
+    // your starting index and ask for the list of zones starting at 4.  Repeat until
+    // you get an empty reply back.
+    index = 1;
+    if (lookup_type == ZIPOP_GETMYZONE) {
+        // However, for some reason best known to Apple circa 1992, GetMyZone requires
+        // the index set to 0 (see Inside Appletalk, p. 8-15).
+        index = 0;
+    }
 
     do {
         atpb.atp_saddr = &saddr;
@@ -146,7 +154,7 @@ int main(int argc, char *argv[])
         temp = ntohs(temp);
         print_zones(temp, (char *) iov.iov_base + 4, chMac);
         index += temp;
-    } while (!myzoneflg && !((char *)iov.iov_base)[0]);
+    } while (lookup_type != ZIPOP_GETMYZONE && !((char *)iov.iov_base)[0]);
 
     if (atp_close(ah) != 0) {
         perror("atp_close");
