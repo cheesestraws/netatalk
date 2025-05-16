@@ -39,7 +39,7 @@ int main(int argc, char *argv[])
     struct servent *se;
     char reqdata[4], buf[ATP_MAXDATA];
     struct iovec iov;
-    short temp, index = 0;
+    uint16_t start_index = 0;
     int c, errflg = 0;
     extern int optind;
     charset_t chMac = CH_MAC;
@@ -112,22 +112,27 @@ int main(int argc, char *argv[])
     reqdata[0] = lookup_type;
     reqdata[1] = 0;
 
-    // We need to set the 'starting index' in the query we're going to send out.
+    // We need to set the "starting index" in the query we're going to send out.
     // This allows for a kind of pagination; you ask for zones starting at zone 1 and
     // you get a reply's worth.  Say you get three zones back.  You then add three to
     // your starting index and ask for the list of zones starting at 4.  Repeat until
-    // you get an empty reply back.
-    index = 1;
+    // you get a reply with the "last reply" flag set.
+    // Yes, this is racy, and will not give the correct results in a network where
+    // the zone state has not converged.  We can't do much about that now...
+    start_index = 1;
     if (lookup_type == ZIPOP_GETMYZONE) {
         // However, for some reason best known to Apple circa 1992, GetMyZone requires
         // the index set to 0 (see Inside Appletalk, p. 8-15).
-        index = 0;
+        start_index = 0;
     }
 
     do {
         atpb.atp_saddr = &saddr;
-        temp = htons(index);
-        memcpy(reqdata + 2, &temp, 2);
+
+        // Put the start index into the packet
+        uint16_t start_idx_for_packet = htons(start_index);
+        memcpy(reqdata + 2, &start_idx_for_packet, 2);
+
         atpb.atp_sreqdata = reqdata;
         atpb.atp_sreqdlen = 4;
         atpb.atp_sreqto = 2;
@@ -150,11 +155,24 @@ int main(int argc, char *argv[])
             exit(1);
         }
 
-        memcpy(&temp, (char *) iov.iov_base + 2, 2);
-        temp = ntohs(temp);
-        print_zones(temp, (char *) iov.iov_base + 4, chMac);
-        index += temp;
-    } while (lookup_type != ZIPOP_GETMYZONE && !((char *)iov.iov_base)[0]);
+        // Print the zones out
+        uint16_t zone_count_returned;
+        memcpy(&zone_count_returned, (char *) iov.iov_base + 2, 2);
+        zone_count_returned = ntohs(zone_count_returned);
+        print_zones(zone_count_returned, (char *) iov.iov_base + 4, chMac);
+
+        // If we're doing a GetMyZone request, we can just bail out now; there will
+        // never be more than one zone returned, so we don't need to ask for the next
+        // "page".
+        if (lookup_type == ZIPOP_GETMYZONE) {
+            break;
+        }
+
+        // Otherwise, we need to add the number of zones returned to the start index
+        // and loop.  The loop condition here is checking the LastFlag field of the
+        // reply, which is 0 if there are more zones to come, and 1 otherwise.
+        start_index += zone_count_returned;
+    } while (!((char *)iov.iov_base)[0]);
 
     if (atp_close(ah) != 0) {
         perror("atp_close");
